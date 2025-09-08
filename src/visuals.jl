@@ -27,42 +27,65 @@ end
 
 using GLMakie, LinearAlgebra
 using GLMakie: Button, scatter!
-function animated_draggable_pendulum(n_pendulums=1)
-    # Create pendulum based on number requested
-    if n_pendulums == 1
-        pen = Pendulum(1; L=[1.5], θ=[π/4], ω=[0.0])
-    elseif n_pendulums == 2
-        pen = Pendulum(2; L=[1.0, 1.0], θ=[π/4, π/6], ω=[0.0, 0.0])
-    elseif n_pendulums == 3
-        pen = Pendulum(3; L=[0.8, 0.8, 0.8], θ=[π/4, π/6, π/8], ω=[0.0, 0.0, 0.0])
-    else
-        error("Only 1, 2, or 3 pendulums supported")
+# Simulation struct to hold multiple pendulums
+struct Simulation
+    pendulums::Vector{Pendulum}
+    colors::Vector{Symbol}
+    
+    function Simulation(pendulums::Vector{<:Pendulum})
+        # Auto-assign colors
+        default_colors = [:blue, :red, :green, :orange, :purple, :cyan, :magenta, :brown]
+        colors = [default_colors[mod1(i, length(default_colors))] for i in 1:length(pendulums)]
+        new(pendulums, colors)
     end
     
-    # Observables
-    x, y = calculate_pendulum_positions(pen)
+    function Simulation(pendulums::Vector{<:Pendulum}, colors::Vector{Symbol})
+        @assert length(pendulums) == length(colors) "Number of pendulums must match number of colors"
+        new(pendulums, colors)
+    end
+end
+
+# Convenience constructors
+Simulation(pen::Pendulum) = Simulation([pen])
+Simulation(pens::Pendulum...) = Simulation([pens...])
+
+function animated_multi_pendulum(sim::Simulation)
+    # Calculate dynamic axis limits based on all pendulums
+    max_reach = maximum(sum(pen.L) for pen in sim.pendulums) + 0.5
+    axis_lim = max_reach + 0.2
     
-    # Create line segments connecting all pendulum points
-    line_points = Observable([Point2f(x[i], y[i]) for i in 1:length(x)])
-    # Mass points (all pendulum bobs)
-    mass_points = Observable([Point2f(x[i], y[i]) for i in 2:length(x)])
-    # Anchor point
-    anchor_point = Observable([Point2f(x[1], y[1])])
+    # Create observables for each pendulum
+    pendulum_data = []
+    for (i, pen) in enumerate(sim.pendulums)
+        x, y = calculate_pendulum_positions(pen)
+        
+        line_points = Observable([Point2f(x[j], y[j]) for j in 1:length(x)])
+        mass_points = Observable([Point2f(x[j], y[j]) for j in 2:length(x)])
+        anchor_point = Observable([Point2f(x[1], y[1])])
+        
+        push!(pendulum_data, (
+            pendulum = pen,
+            color = sim.colors[i],
+            line_points = line_points,
+            mass_points = mass_points,
+            anchor_point = anchor_point
+        ))
+    end
     
     is_animating = Observable(false)
     animation_task = Ref{Union{Task, Nothing}}(nothing)
     
-    # Create figure with padding around the entire figure
-    fig = Figure(size=(600, 650), figure_padding=20)
+    # Create figure
+    fig = Figure(size=(700, 750), figure_padding=20)
 
     # Clean axis without decorations
-    ax = Axis(fig[1, 1:2], aspect=1, limits=(-2.5, 2.5, -2.5, 2.5),
+    ax = Axis(fig[1, 1:2], aspect=1, limits=(-axis_lim, axis_lim, -axis_lim, axis_lim),
               xticksvisible=false, yticksvisible=false,
               xticklabelsvisible=false, yticklabelsvisible=false,
               leftspinevisible=false, rightspinevisible=false,
               topspinevisible=false, bottomspinevisible=false)
     
-    # Buttons in a separate row
+    # Buttons
     button_row = GridLayout(fig[2, 1:2])
     play_btn = Button(button_row[1, 1], label="Play", width=100)
     pause_btn = Button(button_row[1, 2], label="Pause", width=100)
@@ -70,11 +93,8 @@ function animated_draggable_pendulum(n_pendulums=1)
     # Layout settings
     colgap!(fig.layout, 5)
     rowgap!(fig.layout, 5)
-    
-    # Make axis huge, buttons tiny
     rowsize!(fig.layout, 1, Relative(1.0))
     rowsize!(fig.layout, 2, 50)
-
     colsize!(fig.layout, 1, Relative(1.0))
     colsize!(fig.layout, 2, Relative(1.0))
 
@@ -84,53 +104,70 @@ function animated_draggable_pendulum(n_pendulums=1)
     deactivate_interaction!(ax, :scrollzoom)
     deactivate_interaction!(ax, :dragpan)
     
-    # Plot elements - lines connecting all points
-    lines!(ax, line_points, color=:black, linewidth=4)
-    # Anchor point
-    scatter!(ax, anchor_point, color=:red, markersize=15)
-    # All pendulum masses
-    scatter!(ax, mass_points, color=:blue, markersize=25)
+    # Plot all pendulums with their colors
+    for data in pendulum_data
+        lines!(ax, data.line_points, color=data.color, linewidth=4)
+        scatter!(ax, data.anchor_point, color=:black, markersize=12)
+        scatter!(ax, data.mass_points, color=data.color, markersize=20)
+    end
     
-    # Dragging state
+    # Dragging state - using the EXACT same logic as the working single pendulum
     dragging = Ref(false)
-    dragging_index = Ref(0)  # Which pendulum mass is being dragged
+    dragging_pendulum_idx = Ref(0)  # Which pendulum
+    dragging_mass_idx = Ref(0)      # Which mass within that pendulum
     
-    # Function to update the visual
-    function update_visual!()
-        x_new, y_new = calculate_pendulum_positions(pen)
-        line_points[] = [Point2f(x_new[i], y_new[i]) for i in 1:length(x_new)]
-        mass_points[] = [Point2f(x_new[i], y_new[i]) for i in 2:length(x_new)]
+    # Update function for a single pendulum (same as original)
+    function update_single_pendulum_visual!(p_idx)
+        data = pendulum_data[p_idx]
+        x_new, y_new = calculate_pendulum_positions(data.pendulum)
+        data.line_points[] = [Point2f(x_new[i], y_new[i]) for i in 1:length(x_new)]
+        data.mass_points[] = [Point2f(x_new[i], y_new[i]) for i in 2:length(x_new)]
         return x_new, y_new
     end
     
-    # Mouse dragging (only when not animating) - can drag any pendulum mass
+    # Update all pendulums
+    function update_all_visuals!()
+        for i in 1:length(pendulum_data)
+            update_single_pendulum_visual!(i)
+        end
+    end
+    
+    # Mouse dragging - EXACT same logic as working single pendulum
     on(events(fig).mousebutton) do event
         if !is_animating[] && event.button == Mouse.left
             if event.action == Mouse.press
                 mouse_pos = mouseposition(ax.scene)
                 # Check which pendulum mass is being clicked
-                for i in 1:length(mass_points[])
-                    distance = norm(mouse_pos - mass_points[][i])
-                    if distance < 0.3
-                        dragging[] = true
-                        dragging_index[] = i  # Which pendulum mass (1-indexed)
-                        break
+                for (p_idx, data) in enumerate(pendulum_data)
+                    for (m_idx, mass_pos) in enumerate(data.mass_points[])
+                        distance = norm(mouse_pos - mass_pos)
+                        if distance < 0.3
+                            dragging[] = true
+                            dragging_pendulum_idx[] = p_idx
+                            dragging_mass_idx[] = m_idx
+                            return
+                        end
                     end
                 end
             else
                 dragging[] = false
-                dragging_index[] = 0
+                dragging_pendulum_idx[] = 0
+                dragging_mass_idx[] = 0
             end
         end
     end
     
+    # EXACT same mouse position logic as the working single pendulum
     on(events(fig).mouseposition) do mouse_pos
-        if !is_animating[] && dragging[] && dragging_index[] > 0
+        if !is_animating[] && dragging[] && dragging_pendulum_idx[] > 0
             world_pos = mouseposition(ax.scene)
             
-            # Calculate angle for the dragged pendulum segment
+            # Get the pendulum and mass index
+            pen = sim.pendulums[dragging_pendulum_idx[]]
+            pendulum_idx = dragging_mass_idx[]  # Which mass we're dragging
+            
+            # Calculate angle for the dragged pendulum segment - EXACT same logic
             x_curr, y_curr = calculate_pendulum_positions(pen)
-            pendulum_idx = dragging_index[]  # Which pendulum we're dragging
             
             # Calculate angle relative to the appropriate anchor point
             if pendulum_idx == 1
@@ -145,42 +182,50 @@ function animated_draggable_pendulum(n_pendulums=1)
             dy = world_pos[2] - anchor_y
             
             pen.θ[pendulum_idx] = atan(dx, -dy)
-            pen.ω[pendulum_idx] = 0.0
+            pen.ω[pendulum_idx] = 0.0  # Only zero THIS mass's velocity
             
-            x, y = update_visual!()
+            # Update only this pendulum's visual
+            x, y = update_single_pendulum_visual!(dragging_pendulum_idx[])
         end
     end
     
-    # Play button functionality
+    # Play button - animates ALL pendulums
     on(play_btn.clicks) do n
         if is_animating[]
-            # Stop animation
             is_animating[] = false
             play_btn.label = "Play"
         else
-            # Start animation
             is_animating[] = true
             play_btn.label = "Stop"
             
-            # Start animation loop
             animation_task[] = @async begin
                 while is_animating[]
-                    pen()  # Update physics using your RK4 code!
-                    x, y = update_visual!()
-                    sleep(0.016)  # ~60 FPS
+                    for data in pendulum_data
+                        data.pendulum()
+                    end
+                    update_all_visuals!()
+                    sleep(0.016)
                 end
             end
         end
     end
     
-    # Pause button - stops motion but keeps current position
+    # Pause button - stops ALL pendulums
     on(pause_btn.clicks) do n
-        # Stop all velocities
-        pen.ω .= 0.0
-        # Stop animation if running
+        for data in pendulum_data
+            data.pendulum.ω .= 0.0
+        end
         is_animating[] = false
         play_btn.label = "Play"
     end
     
     return fig
 end
+
+# Example usage:
+p1 = Pendulum(1; L=[1.5], θ=[π/4], ω=[0.0])
+p2 = Pendulum(2; L=[1.0, 1.0], θ=[π/6, π/3], ω=[0.0, 0.0])
+p3 = Pendulum(3; L=[0.8, 0.8, 0.8], θ=[π/8, π/4, π/2], ω=[0.0, 0.0, 0.0])
+
+sim = Simulation([p1, p2, p3])
+animated_multi_pendulum(sim)
