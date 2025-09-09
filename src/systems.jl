@@ -64,24 +64,50 @@ function triple_pendulum_accelerations(θs, ωs, masses, lengths, g)
     m₁, m₂, m₃ = masses
     l₁, l₂, l₃ = lengths
     
-    s1 = sin(θ₁);  s2 = sin(θ₂);  s3 = sin(θ₃)
-    s12 = sin(θ₁ - θ₂);  c12 = cos(θ₁ - θ₂)
-    s13 = sin(θ₁ - θ₃);  c13 = cos(θ₁ - θ₃)
-    s23 = sin(θ₂ - θ₃);  c23 = cos(θ₂ - θ₃)
-
-    A = @SMatrix [
-        (m₁+m₂+m₃)*l₁^2    (m₂+m₃)*l₁*l₂*c12    m₃*l₁*l₃*c13;
-        (m₂+m₃)*l₁*l₂*c12  (m₂+m₃)*l₂^2         m₃*l₂*l₃*c23;
-        m₃*l₁*l₃*c13       m₃*l₂*l₃*c23         m₃*l₃^2
+    # Precompute trig functions
+    s₁, c₁ = sincos(θ₁)
+    s₂, c₂ = sincos(θ₂)  
+    s₃, c₃ = sincos(θ₃)
+    s₁₂, c₁₂ = sincos(θ₁ - θ₂)
+    s₁₃, c₁₃ = sincos(θ₁ - θ₃)
+    s₂₃, c₂₃ = sincos(θ₂ - θ₃)
+    
+    # Mass matrix (inertia matrix)
+    M11 = (m₁ + m₂ + m₃) * l₁^2
+    M12 = (m₂ + m₃) * l₁ * l₂ * c₁₂
+    M13 = m₃ * l₁ * l₃ * c₁₃
+    M21 = (m₂ + m₃) * l₁ * l₂ * c₁₂
+    M22 = (m₂ + m₃) * l₂^2
+    M23 = m₃ * l₂ * l₃ * c₂₃
+    M31 = m₃ * l₁ * l₃ * c₁₃
+    M32 = m₃ * l₂ * l₃ * c₂₃
+    M33 = m₃ * l₃^2
+    
+    # Coriolis and centrifugal terms
+    h₁ = -(m₂ + m₃) * l₁ * l₂ * s₁₂ * ω₂^2 - m₃ * l₁ * l₃ * s₁₃ * ω₃^2
+    h₂ = (m₂ + m₃) * l₁ * l₂ * s₁₂ * ω₁^2 - m₃ * l₂ * l₃ * s₂₃ * ω₃^2
+    h₃ = m₃ * l₁ * l₃ * s₁₃ * ω₁^2 + m₃ * l₂ * l₃ * s₂₃ * ω₂^2
+    
+    # Gravity terms
+    G₁ = -(m₁ + m₂ + m₃) * g * l₁ * s₁
+    G₂ = -(m₂ + m₃) * g * l₂ * s₂
+    G₃ = -m₃ * g * l₃ * s₃
+    
+    # Right hand side vector
+    rhs₁ = h₁ + G₁
+    rhs₂ = h₂ + G₂ 
+    rhs₃ = h₃ + G₃
+    
+    # Solve M * accelerations = rhs
+    M_matrix = @SMatrix [
+        M11 M12 M13;
+        M21 M22 M23;
+        M31 M32 M33
     ]
-
-    b = @SVector [
-        (m₂+m₃)*l₁*l₂*s12*ω₂^2 + m₃*l₁*l₃*s13*ω₃^2 - (m₁+m₂+m₃)*g*l₁*s1,
-        -(m₂+m₃)*l₁*l₂*s12*ω₁^2 + m₃*l₂*l₃*s23*ω₃^2 - (m₂+m₃)*g*l₂*s2,
-        -m₃*l₁*l₃*s13*ω₁^2 - m₃*l₂*l₃*s23*ω₂^2 - m₃*g*l₃*s3
-    ]
-
-    return A \ b
+    
+    rhs = @SVector [rhs₁, rhs₂, rhs₃]
+    
+    return M_matrix \ rhs
 end
 
 
